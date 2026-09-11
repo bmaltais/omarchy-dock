@@ -198,6 +198,18 @@ Item {
     function onRawEvent(event) { dockState.refresh() }
   }
 
+  // DesktopEntries scans .desktop files asynchronously in the background,
+  // so the very first refresh() (Component.onCompleted, below) can run
+  // before it has found any entries, resolving every already-open Window's
+  // App to null. Without this, those Windows would be stuck showing a
+  // blank Letter Tile forever, since nothing else re-resolves an Item once
+  // built — Hyprland's own onRawEvent refresh happens to paper over this on
+  // a busy desktop, but not on one sitting idle right after the Dock loads.
+  Connections {
+    target: DesktopEntries.applications
+    function onValuesChanged() { dockState.refresh() }
+  }
+
   Component.onCompleted: dockState.refresh()
 
   function resolveApp(window) {
