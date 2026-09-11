@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "bernard.dock",
   "name": "Dock",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "author": "Bernard Maltais",
   "license": "MIT",
   "description": "A macOS/Windows-style dock: every open window on every workspace and monitor, plus pinned apps.",

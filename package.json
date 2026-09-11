@@ -1,7 +1,7 @@
 {
   "name": "omarchy-dock",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Node test harness for the Omarchy Dock's pure JS model.",
   "scripts": {
     "test": "node --test"
