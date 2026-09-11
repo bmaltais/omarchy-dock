@@ -558,21 +558,72 @@ Item {
 
         function close() { contextMenu.visible = false }
 
+        // Hovering the menu itself (docs/SPEC.md's own hide-timer feel:
+        // leaving it closes the menu after hideDelayMs, the same delay the
+        // Dock's own auto-hide uses, so a brief crossing between rows or
+        // from the anchor Item onto the popup doesn't close it early).
+        readonly property bool hoveringMenu: menuHover.hovered
+        // The pointer needs a moment to travel from the anchor Item up to
+        // the popup after a right click opens it — unlike the Dock's own
+        // hide timer, there's no antecedent hover to fall back on, since
+        // the click that opened the menu isn't itself a hover. graceTimer
+        // holds off treating "not on the menu yet" as a reason to close
+        // for graceMs after open; once it elapses, an Item the pointer
+        // never reached at all still closes itself instead of sitting
+        // open forever (an outside click always closes it regardless).
+        readonly property int graceMs: 1500
+        property bool graceElapsed: false
+
+        // Without this, the popup renders on top but never actually
+        // becomes the surface Hyprland routes pointer input to — hover
+        // and clicks fall through to whatever's underneath, and any real
+        // click reads as "outside" to the focus grab below.
+        grabFocus: true
+
         visible: false
         color: "transparent"
         implicitWidth: contextMenu.rowWidth
         implicitHeight: menuColumn.implicitHeight
 
-        onVisibleChanged: revealState.menuOpen = contextMenu.visible
-
-        // Outside-click dismissal, same mechanism as PopupCard: while
-        // active, input is routed only to the popup and the panel behind
-        // it, so a click anywhere else clears the grab and closes the menu.
-        HyprlandFocusGrab {
-          active: contextMenu.visible
-          windows: contextMenu.anchorWindow ? [contextMenu, contextMenu.anchorWindow] : [contextMenu]
-          onCleared: contextMenu.close()
+        onVisibleChanged: {
+          revealState.menuOpen = contextMenu.visible
+          if (contextMenu.visible) {
+            contextMenu.graceElapsed = false
+            menuGraceTimer.restart()
+          } else {
+            menuGraceTimer.stop()
+            menuLeaveTimer.stop()
+          }
         }
+
+        onHoveringMenuChanged: {
+          if (contextMenu.hoveringMenu) menuLeaveTimer.stop()
+          else if (contextMenu.visible && contextMenu.graceElapsed) menuLeaveTimer.restart()
+        }
+
+        onGraceElapsedChanged: {
+          if (contextMenu.graceElapsed && contextMenu.visible && !contextMenu.hoveringMenu) menuLeaveTimer.restart()
+        }
+
+        Timer {
+          id: menuGraceTimer
+          interval: contextMenu.graceMs
+          onTriggered: contextMenu.graceElapsed = true
+        }
+
+        Timer {
+          id: menuLeaveTimer
+          interval: root.hideDelayMs
+          onTriggered: contextMenu.close()
+        }
+
+        // Outside-click dismissal: grabFocus's own compositor grab already
+        // dismisses the popup on an outside click; onClosed is the signal
+        // it fires when that happens, so this only needs to mirror that
+        // into `visible`. A second, separate HyprlandFocusGrab here (as
+        // PopupCard uses, for a popup that does *not* set grabFocus)
+        // fought this one and cleared it the instant it opened.
+        onClosed: contextMenu.close()
 
         anchor {
           id: menuAnchor
@@ -605,6 +656,10 @@ Item {
           border.width: Style.normalBorderWidth
           border.color: Color.popups.border
 
+          HoverHandler {
+            id: menuHover
+          }
+
           Column {
             id: menuColumn
             anchors.left: parent.left
@@ -622,7 +677,9 @@ Item {
                 width: menuColumn.width
                 height: Style.spacing.popupRowHeight
                 radius: Style.cornerRadius
-                color: menuRow.modelData.enabled && rowHover.hovered
+                // containsMouse, not a HoverHandler, to match Button.qml's
+                // own hover-fill convention.
+                color: menuRow.modelData.enabled && rowMouse.containsMouse
                   ? Style.hoverFillFor(Color.foreground, Color.accent)
                   : "transparent"
 
@@ -638,13 +695,10 @@ Item {
                   font.pixelSize: Style.font.body
                 }
 
-                HoverHandler {
-                  id: rowHover
-                  enabled: menuRow.modelData.enabled
-                }
-
                 MouseArea {
+                  id: rowMouse
                   anchors.fill: parent
+                  hoverEnabled: true
                   enabled: menuRow.modelData.enabled
                   cursorShape: Qt.PointingHandCursor
                   onClicked: {
