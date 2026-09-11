@@ -8,6 +8,7 @@ const {
   DEFAULT_HIDE_DELAY_MS,
   findPluginEntry,
   effectiveSettings,
+  effectivePins,
   mergeSettings,
 } = require("../DockConfig.js");
 
@@ -99,4 +100,29 @@ test("mergeSettings starts from an empty object when there is no existing entry"
   const merged = mergeSettings(null, { iconSize: 64 });
 
   assert.deepEqual(merged, { iconSize: 64 });
+});
+
+test("effectivePins is empty when the entry has no Pins", () => {
+  assert.deepEqual(effectivePins(null), []);
+  assert.deepEqual(effectivePins({ id: PLUGIN_ID }), []);
+});
+
+test("effectivePins passes through a well-formed Pins list in its persisted order", () => {
+  const pins = effectivePins({ id: PLUGIN_ID, pins: ["firefox", "alacritty"] });
+
+  assert.deepEqual(pins, ["firefox", "alacritty"]);
+});
+
+test("effectivePins drops a hand-edited entry that isn't a usable App id", () => {
+  const pins = effectivePins({
+    pins: ["firefox", 42, null, "", "alacritty"],
+  });
+
+  assert.deepEqual(pins, ["firefox", "alacritty"]);
+});
+
+test("effectivePins dedupes a repeated App id, keeping its first slot", () => {
+  const pins = effectivePins({ pins: ["firefox", "alacritty", "firefox"] });
+
+  assert.deepEqual(pins, ["firefox", "alacritty"]);
 });

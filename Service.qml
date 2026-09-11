@@ -1,9 +1,11 @@
-// Dock service entry point (see docs/SPEC.md, milestones 1-3; vocabulary in
+// Dock service entry point (see docs/SPEC.md, milestones 1-4; vocabulary in
 // CONTEXT.md). Owns one layer-shell panel per monitor, each rendering the
-// same Window Items built by DockModel.buildDockItems from live Hyprland
-// state, Hidden by default and Revealed by hovering its Reveal Strip, with
-// the Active/Attention/running/workspace indicators from milestone 3. Pins
-// land in a later milestone.
+// same Items built by DockModel.buildDockItems from live Hyprland state
+// and the Dock's own Pins, Hidden by default and Revealed by hovering its
+// Reveal Strip, with the Active/Attention/running/workspace indicators
+// from milestone 3. The gesture to Pin/Unpin an App (the context menu)
+// lands in a later ticket; this only shows and launches Pins already in
+// the config.
 import QtQuick
 import Quickshell
 import Quickshell.Io
@@ -37,15 +39,17 @@ Item {
   // window's bottom edge.
   readonly property int revealStripHeight: 4
 
-  // Settings (docs/SPEC.md "Configuration"): read from the Dock's own entry
-  // in the shell config's plugins[] array and written back through
-  // shell.updateEntryInline, the write-back hook the shell gives every
-  // plugin for its own entry (PluginShellApi.updateEntryInline). rawEntry
-  // keeps the entry exactly as last read so write() can fold a settings
+  // Settings and Pins (docs/SPEC.md "Configuration"): read from the Dock's
+  // own entry in the shell config's plugins[] array and written back
+  // through shell.updateEntryInline, the write-back hook the shell gives
+  // every plugin for its own entry (PluginShellApi.updateEntryInline).
+  // rawEntry keeps the entry exactly as last read so write() can fold a
   // change onto it (DockConfig.mergeSettings) instead of replacing it
-  // outright — updateEntryInline persists whatever object it's given as the
-  // whole entry, so losing rawEntry's other keys here would lose them from
-  // shell.json too, including Pins once a later milestone adds them.
+  // outright — updateEntryInline persists whatever object it's given as
+  // the whole entry, so losing rawEntry's other keys here would lose them
+  // from shell.json too. pins re-triggers dockState.refresh() on change
+  // (below) the same way a Hyprland event does, so a hand edit to the
+  // Pins list applies live exactly like a hand edit to a setting does.
   QtObject {
     id: dockSettings
 
@@ -54,6 +58,9 @@ Item {
     property int iconSize: DockConfig.DEFAULT_ICON_SIZE
     property int revealDelayMs: DockConfig.DEFAULT_REVEAL_DELAY_MS
     property int hideDelayMs: DockConfig.DEFAULT_HIDE_DELAY_MS
+    property var pins: []
+
+    onPinsChanged: dockState.refresh()
 
     function applyShellConfig(shellConfig) {
       var entry = DockConfig.findPluginEntry(shellConfig, dockSettings.pluginId)
@@ -62,12 +69,14 @@ Item {
       dockSettings.iconSize = effective.iconSize
       dockSettings.revealDelayMs = effective.revealDelayMs
       dockSettings.hideDelayMs = effective.hideDelayMs
+      dockSettings.pins = DockConfig.effectivePins(entry)
     }
 
-    // No caller yet — a settings UI lands with Pins in a later milestone —
-    // but applying a write's result still goes through shellConfigFile's
-    // own reload, the same path a hand edit takes, so there will be exactly
-    // one place that turns config into live settings once one exists.
+    // No caller yet — the gesture to Pin/Unpin an App lands with the
+    // context menu in a later ticket — but applying a write's result still
+    // goes through shellConfigFile's own reload, the same path a hand edit
+    // takes, so there will be exactly one place that turns config into
+    // live settings once one exists.
     function write(patch) {
       if (!root.shell || typeof root.shell.updateEntryInline !== "function") return false
       var merged = DockConfig.mergeSettings(dockSettings.rawEntry, patch)
@@ -140,7 +149,7 @@ Item {
       }
       dockState.openedAtByAddress = keptOpenedAt
 
-      dockState.items = DockModel.buildDockItems(windows, resolveApp)
+      dockState.items = DockModel.buildDockItems(windows, resolveApp, dockSettings.pins, resolveAppById)
     }
   }
 
@@ -153,6 +162,15 @@ Item {
 
   function resolveApp(window) {
     return window.class ? DesktopEntries.heuristicLookup(window.class) || null : null
+  }
+
+  // A Pin resolves its own App directly by the id it was pinned under
+  // (CONTEXT.md "Pin"), independent of any Window — unlike resolveApp,
+  // which only ever has a window class to go on. A falsy return here is
+  // exactly the "App is no longer installed" case (docs/SPEC.md "What the
+  // Dock shows").
+  function resolveAppById(appId) {
+    return appId ? DesktopEntries.byId(appId) || null : null
   }
 
   // HyprlandToplevel.address comes back as bare hex ("56538020a4f0"),
@@ -176,6 +194,28 @@ Item {
       + "hyprctl dispatch \"hl.dsp.focus({ window = \\\"address:$addr\\\" })\"; "
       + "hyprctl eval \"hl.config({ cursor = { no_warps = $orig } })\" >/dev/null"
     Quickshell.execDetached(["bash", "-lc", script, "bash", normalized])
+  }
+
+  // Left click on a Pin with no Windows launches its App (docs/SPEC.md
+  // "Input"). A missing App's Pin has no `execute` to call — clicking it
+  // is a no-op until Unpin, same as a Letter Tile Window Item is a no-op
+  // to click on today.
+  function launchApp(app) {
+    if (!app || typeof app.execute !== "function") return
+    app.execute()
+  }
+
+  // A Pin's tooltip (docs/SPEC.md "What the Dock shows": "a 'missing'
+  // tooltip"): the App's own name once resolved, its bare Pin id if the
+  // App resolved but has none, or an explicit missing note once its App
+  // is no longer installed.
+  function pinTooltipText(item) {
+    if (item.missing) return item.appId + " (missing)"
+    return (item.app && item.app.name) || item.appId
+  }
+
+  function windowTooltipText(item) {
+    return (item.window.title || item.window.class || "") + "\nWorkspace: " + (item.badge || "")
   }
 
   Variants {
@@ -303,6 +343,7 @@ Item {
 
             readonly property bool active: dockItem.modelData.active
             readonly property bool attention: dockItem.modelData.attention
+            readonly property bool isPin: dockItem.modelData.kind === "pin"
 
             width: dockRow.iconSize
             height: icon.height + runningDot.height + Style.spacing.xxs
@@ -391,6 +432,10 @@ Item {
                 hoverEnabled: true
                 acceptedButtons: Qt.LeftButton
                 onClicked: {
+                  if (dockItem.isPin) {
+                    root.launchApp(dockItem.modelData.app)
+                    return
+                  }
                   if (dockItem.active) return
                   root.focusWindow(dockItem.modelData.window.id)
                 }
@@ -403,16 +448,18 @@ Item {
               // revealState and can't keep the Dock revealed on its own.
               PanelToolTip {
                 visible: mouseArea.containsMouse && revealState.revealed
-                text: (dockItem.modelData.window.title || dockItem.modelData.window.class || "")
-                  + "\nWorkspace: " + (dockItem.modelData.badge || "")
+                text: dockItem.isPin
+                  ? root.pinTooltipText(dockItem.modelData)
+                  : root.windowTooltipText(dockItem.modelData)
               }
             }
 
             // The running dot (SPEC.md "Indicators"): every Window Item
-            // shows one, so a future Pin with no Windows is the only Item
-            // without it.
+            // shows one; a Pin with no Windows (CONTEXT.md "Pin") is the
+            // only Item without it.
             Rectangle {
               id: runningDot
+              visible: !dockItem.isPin
               anchors.top: icon.bottom
               anchors.topMargin: Style.spacing.xxs
               anchors.horizontalCenter: parent.horizontalCenter

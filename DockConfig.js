@@ -4,13 +4,17 @@
 // DockModel.js.
 //
 // Settings live in the Dock's own entry in the shell config's `plugins[]`
-// array: `{ id: "bernard.dock", iconSize, revealDelayMs, hideDelayMs }`.
+// array: `{ id: "bernard.dock", iconSize, revealDelayMs, hideDelayMs, pins }`.
 // findPluginEntry locates that entry (or null if the Dock has never been
 // enabled or the config can't be read); effectiveSettings turns it into the
 // three settings the Dock actually uses, defaulting anything missing or not
-// a usable positive number. mergeSettings folds a settings change onto the
-// raw entry rather than replacing it outright, so keys this ticket doesn't
-// know about (Pins, added in a later milestone) survive a write-back.
+// a usable positive number. effectivePins reads the same entry's `pins`
+// (the ordered array of App ids DockModel.js's buildDockItems takes),
+// cleaned of anything a hand edit could leave unusable — not a string, or
+// a duplicate that would give two slots to the same App. mergeSettings
+// folds a settings change onto the raw entry rather than replacing it
+// outright, so keys a change doesn't mention (pins included, when the
+// change is only to icon size or a delay) survive a write-back.
 
 var DEFAULT_ICON_SIZE = 48;
 var DEFAULT_REVEAL_DELAY_MS = 200;
@@ -50,6 +54,21 @@ function effectiveSettings(entry) {
   };
 }
 
+function effectivePins(entry) {
+  var source = isPlainObject(entry) ? entry : {};
+  var rawPins = Array.isArray(source.pins) ? source.pins : [];
+  var seen = {};
+  var pins = [];
+  for (var i = 0; i < rawPins.length; i++) {
+    var id = rawPins[i];
+    if (typeof id === "string" && id.length > 0 && !seen[id]) {
+      seen[id] = true;
+      pins.push(id);
+    }
+  }
+  return pins;
+}
+
 function mergeSettings(entry, patch) {
   var next = {};
   var source = isPlainObject(entry) ? entry : {};
@@ -66,6 +85,7 @@ if (typeof module !== "undefined" && module.exports) {
     DEFAULT_HIDE_DELAY_MS: DEFAULT_HIDE_DELAY_MS,
     findPluginEntry: findPluginEntry,
     effectiveSettings: effectiveSettings,
+    effectivePins: effectivePins,
     mergeSettings: mergeSettings,
   };
 }

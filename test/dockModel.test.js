@@ -159,3 +159,129 @@ test("a Window Item's workspace badge is the special workspace's own name, witho
 
   assert.equal(items[0].badge, "scratchpad");
 });
+
+function describeItem(item) {
+  return item.kind === "pin" ? `pin:${item.appId}` : `window:${item.window.id}`;
+}
+
+function describeItems(items) {
+  return items.map(describeItem);
+}
+
+test("a Window Item resolved to an App is reported as pinnable", () => {
+  const windows = [makeWindow({ id: "w1", class: "firefox" })];
+
+  const items = buildDockItems(windows, resolveBrowserAndTerminal);
+
+  assert.equal(items[0].pinnable, true);
+});
+
+test("a Letter Tile Window Item is reported as not pinnable", () => {
+  const windows = [makeWindow({ id: "w1", class: "Unknown-Editor" })];
+
+  const items = buildDockItems(windows, () => null);
+
+  assert.equal(items[0].pinnable, false);
+});
+
+test("a Pin with no Windows shows its App without a Letter Tile and isn't missing", () => {
+  const items = buildDockItems(
+    [],
+    () => null,
+    ["firefox"],
+    (id) => ({ id, icon: "firefox-icon" }),
+  );
+
+  assert.deepEqual(describeItems(items), ["pin:firefox"]);
+  assert.equal(items[0].app.id, "firefox");
+  assert.equal(items[0].letter, null);
+  assert.equal(items[0].missing, false);
+});
+
+test("while a pinned App has Windows, their Window Items occupy the Pin's slot instead of a bare Pin", () => {
+  const windows = [makeWindow({ id: "firefox-1", class: "firefox" })];
+
+  const items = buildDockItems(
+    windows,
+    resolveBrowserAndTerminal,
+    ["firefox"],
+    (id) => ({ id }),
+  );
+
+  assert.deepEqual(describeItems(items), ["window:firefox-1"]);
+});
+
+test("multiple Windows of a pinned App occupy its slot together, in Launch Order", () => {
+  const windows = [
+    makeWindow({ id: "firefox-2", class: "firefox", openedAt: 2 }),
+    makeWindow({ id: "firefox-1", class: "firefox", openedAt: 1 }),
+  ];
+
+  const items = buildDockItems(
+    windows,
+    resolveBrowserAndTerminal,
+    ["firefox"],
+    (id) => ({ id }),
+  );
+
+  assert.deepEqual(describeItems(items), ["window:firefox-1", "window:firefox-2"]);
+});
+
+test("when the last Window of a pinned App closes, the Pin returns at the same slot", () => {
+  const resolveAppById = (id) => ({ id });
+  const withWindow = buildDockItems(
+    [makeWindow({ id: "firefox-1", class: "firefox" })],
+    resolveBrowserAndTerminal,
+    ["alacritty", "firefox"],
+    resolveAppById,
+  );
+  const withoutWindow = buildDockItems(
+    [],
+    resolveBrowserAndTerminal,
+    ["alacritty", "firefox"],
+    resolveAppById,
+  );
+
+  assert.deepEqual(describeItems(withWindow), ["pin:alacritty", "window:firefox-1"]);
+  assert.deepEqual(describeItems(withoutWindow), ["pin:alacritty", "pin:firefox"]);
+});
+
+test("a Pin whose App is no longer installed shows a Letter Tile and is reported as missing", () => {
+  const items = buildDockItems([], () => null, ["ghost-app"], () => null);
+
+  assert.equal(items[0].app, null);
+  assert.equal(items[0].missing, true);
+  assert.equal(items[0].letter, "g");
+});
+
+test("Pins occupy the Dock's leading slots in their persisted order, ahead of every unpinned Window in Launch Order", () => {
+  const windows = [
+    makeWindow({ id: "unpinned-1", class: "btop", openedAt: 1 }),
+    makeWindow({ id: "firefox-1", class: "firefox", openedAt: 2 }),
+  ];
+
+  const items = buildDockItems(
+    windows,
+    resolveBrowserAndTerminal,
+    ["alacritty", "firefox"],
+    (id) => ({ id }),
+  );
+
+  assert.deepEqual(describeItems(items), [
+    "pin:alacritty",
+    "window:firefox-1",
+    "window:unpinned-1",
+  ]);
+});
+
+test("an empty Pins list reproduces plain Launch Order, unchanged from before Pins existed", () => {
+  const windows = [
+    makeWindow({ id: "w1", class: "firefox", openedAt: 1 }),
+    makeWindow({ id: "w2", class: "alacritty", openedAt: 2 }),
+  ];
+
+  const withEmptyPins = buildDockItems(windows, resolveBrowserAndTerminal, [], () => null);
+  const withoutPinsArgs = buildDockItems(windows, resolveBrowserAndTerminal);
+
+  assert.deepEqual(describeItems(withEmptyPins), describeItems(withoutPinsArgs));
+});
