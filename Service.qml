@@ -1,8 +1,8 @@
-// Dock service entry point (see docs/SPEC.md, milestone 1; vocabulary in
+// Dock service entry point (see docs/SPEC.md, milestones 1-2; vocabulary in
 // CONTEXT.md). Owns one layer-shell panel per monitor, each rendering the
 // same Window Items built by DockModel.buildDockItems from live Hyprland
-// state. Auto-hide, indicators, and Pins land in later milestones — this is
-// the static, always-on Dock.
+// state, Hidden by default and Revealed by hovering its Reveal Strip.
+// Indicators and Pins land in later milestones.
 import QtQuick
 import Quickshell
 import Quickshell.Wayland
@@ -15,6 +15,20 @@ Item {
 
   // Injected by omarchy-shell (the first-party/plugin service loader).
   property var shell: null
+
+  // Auto-hide timing (SPEC.md "How the Dock behaves"). These become
+  // user settings in milestone 4; today they're the fixed defaults.
+  // hideDelayMs must comfortably exceed slideDurationMs: the pointer
+  // crosses the sliver between the Reveal Strip and the risen Dock while
+  // neither is hovered, and the hide timer must not win that race.
+  readonly property int revealDelayMs: 200
+  readonly property int hideDelayMs: 300
+  readonly property int slideDurationMs: 150
+  // Kept just thick enough to be reliably hoverable; the screen edge itself
+  // stops the cursor, so the strip doesn't need real height to feel solid,
+  // and staying thin keeps it from swallowing clicks meant for a maximized
+  // window's bottom edge.
+  readonly property int revealStripHeight: 4
 
   // Tracks Launch Order across live IPC updates: each Window's opened-at
   // rank is assigned the first time its address is seen and kept for as
@@ -126,15 +140,81 @@ Item {
         right: true
       }
 
-      mask: Region { item: dockRow }
+      // The input region is the union of the Reveal Strip and the Dock
+      // itself: whichever one the Row's slide currently makes zero-area
+      // simply contributes nothing, so this holds for both Dock states.
+      mask: Region {
+        Region { item: revealStrip }
+        Region { item: dockRow }
+      }
+
+      // Full-width, above any bar reservation because it's anchored to
+      // this panel's own bottom edge, which ExclusionMode.Normal already
+      // keeps clear of the bar's exclusive zone (see exclusionMode above).
+      Item {
+        id: revealStrip
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        height: root.revealStripHeight
+
+        HoverHandler {
+          onHoveredChanged: revealState.hoveringStrip = hovered
+        }
+      }
+
+      // Hidden/Revealed and the reveal/hide timers (SPEC.md "How the Dock
+      // behaves"). Kept per panel, so hovering one monitor's Reveal Strip
+      // never reveals the other monitor's Dock.
+      QtObject {
+        id: revealState
+
+        property bool hoveringStrip: false
+        property bool hoveringDock: false
+        property bool revealed: false
+        readonly property bool hovering: hoveringStrip || hoveringDock
+
+        onHoveringChanged: {
+          if (hovering) {
+            hideTimer.stop()
+            if (!revealed) revealTimer.restart()
+          } else {
+            revealTimer.stop()
+            hideTimer.restart()
+          }
+        }
+      }
+
+      Timer {
+        id: revealTimer
+        interval: root.revealDelayMs
+        onTriggered: revealState.revealed = true
+      }
+
+      Timer {
+        id: hideTimer
+        interval: root.hideDelayMs
+        onTriggered: revealState.revealed = false
+      }
 
       Row {
         id: dockRow
 
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
-        anchors.bottomMargin: Style.gapsOut
+        // Hidden parks the Row below the visible edge without unmapping
+        // the panel itself; Revealed rests it at the usual gap. Slides
+        // between the two over slideDurationMs.
+        anchors.bottomMargin: revealState.revealed ? Style.gapsOut : -(height + Style.gapsOut)
         spacing: Style.spacing.sm
+
+        Behavior on anchors.bottomMargin {
+          NumberAnimation { duration: root.slideDurationMs; easing.type: Easing.InOutCubic }
+        }
+
+        HoverHandler {
+          onHoveredChanged: revealState.hoveringDock = hovered
+        }
 
         readonly property int baseIconSize: 48
         readonly property real maxWidth: Math.max(0, panel.width - Style.gapsOut * 2)
