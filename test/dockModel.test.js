@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const { buildDockItems } = require("../DockModel.js");
+const { buildDockItems, menuFor, nextPins } = require("../DockModel.js");
 
 function makeWindow(overrides) {
   return Object.assign(
@@ -274,6 +274,27 @@ test("Pins occupy the Dock's leading slots in their persisted order, ahead of ev
   ]);
 });
 
+test("a Window Item occupying a pinned App's slot is reported as pinned", () => {
+  const windows = [makeWindow({ id: "firefox-1", class: "firefox" })];
+
+  const items = buildDockItems(
+    windows,
+    resolveBrowserAndTerminal,
+    ["firefox"],
+    (id) => ({ id }),
+  );
+
+  assert.equal(items[0].pinned, true);
+});
+
+test("a Window Item whose App is not pinned is reported as not pinned", () => {
+  const windows = [makeWindow({ id: "w1", class: "firefox" })];
+
+  const items = buildDockItems(windows, resolveBrowserAndTerminal);
+
+  assert.equal(items[0].pinned, false);
+});
+
 test("an empty Pins list reproduces plain Launch Order, unchanged from before Pins existed", () => {
   const windows = [
     makeWindow({ id: "w1", class: "firefox", openedAt: 1 }),
@@ -284,4 +305,101 @@ test("an empty Pins list reproduces plain Launch Order, unchanged from before Pi
   const withoutPinsArgs = buildDockItems(windows, resolveBrowserAndTerminal);
 
   assert.deepEqual(describeItems(withEmptyPins), describeItems(withoutPinsArgs));
+});
+
+test("menuFor reports Pin (not yet pinned) for a Window Item with a resolvable App", () => {
+  const windows = [makeWindow({ id: "w1", class: "firefox" })];
+  const items = buildDockItems(windows, resolveBrowserAndTerminal);
+
+  const menu = menuFor(items[0]);
+
+  assert.deepEqual(menu, {
+    pinned: false,
+    canPin: true,
+    canLaunch: true,
+    canClose: true,
+  });
+});
+
+test("menuFor reports Unpin for a Window Item occupying a pinned App's slot", () => {
+  const windows = [makeWindow({ id: "firefox-1", class: "firefox" })];
+  const items = buildDockItems(
+    windows,
+    resolveBrowserAndTerminal,
+    ["firefox"],
+    (id) => ({ id }),
+  );
+
+  const menu = menuFor(items[0]);
+
+  assert.deepEqual(menu, {
+    pinned: true,
+    canPin: true,
+    canLaunch: true,
+    canClose: true,
+  });
+});
+
+test("menuFor disables Pin, launch, but not close, for a Letter Tile Window Item", () => {
+  const windows = [makeWindow({ id: "w1", class: "Unknown-Editor" })];
+  const items = buildDockItems(windows, () => null);
+
+  const menu = menuFor(items[0]);
+
+  assert.deepEqual(menu, {
+    pinned: false,
+    canPin: false,
+    canLaunch: false,
+    canClose: true,
+  });
+});
+
+test("menuFor reports Unpin and disables Close Window for a Pin with no Windows", () => {
+  const items = buildDockItems([], () => null, ["firefox"], (id) => ({ id }));
+
+  const menu = menuFor(items[0]);
+
+  assert.deepEqual(menu, {
+    pinned: true,
+    canPin: true,
+    canLaunch: true,
+    canClose: false,
+  });
+});
+
+test("menuFor still allows Unpin, but disables launch and close, for a Pin whose App is missing", () => {
+  const items = buildDockItems([], () => null, ["ghost-app"], () => null);
+
+  const menu = menuFor(items[0]);
+
+  assert.deepEqual(menu, {
+    pinned: true,
+    canPin: true,
+    canLaunch: false,
+    canClose: false,
+  });
+});
+
+test("nextPins appends an App id when Pin is chosen and it isn't already pinned", () => {
+  assert.deepEqual(nextPins(["alacritty"], "firefox", false), [
+    "alacritty",
+    "firefox",
+  ]);
+});
+
+test("nextPins leaves the list unchanged when Pin is chosen for an App already pinned", () => {
+  assert.deepEqual(nextPins(["alacritty", "firefox"], "firefox", false), [
+    "alacritty",
+    "firefox",
+  ]);
+});
+
+test("nextPins removes an App id when Unpin is chosen", () => {
+  assert.deepEqual(nextPins(["alacritty", "firefox"], "firefox", true), [
+    "alacritty",
+  ]);
+});
+
+test("nextPins leaves the list unchanged when Unpin is chosen for an App that isn't pinned", () => {
+  assert.deepEqual(nextPins(["alacritty"], "firefox", true), ["alacritty"]);
 });

@@ -1,9 +1,9 @@
 // Pure Dock model (see docs/SPEC.md, milestones M2-M4; vocabulary in
 // CONTEXT.md). No Quickshell or QML imports, so the exact same file loads
 // as a JS import inside the shell and via `require` under Node for the
-// test suite. This ticket adds Pins: an App kept in the Dock whether or
-// not it has Windows. Placed positions (drag to reorder) extend
-// `buildDockItems` in a later ticket.
+// test suite. This ticket adds the context menu's state via `menuFor`.
+// Placed positions (drag to reorder) extend `buildDockItems` in a later
+// ticket.
 //
 // A Window is `{ id, class, workspace, openedAt, title, active, attention }`.
 // `openedAt` is a monotonically increasing value (timestamp or counter)
@@ -53,7 +53,7 @@ function badgeFor(workspace) {
   return name;
 }
 
-function toWindowItem(window, app) {
+function toWindowItem(window, app, pinned) {
   return {
     kind: "window",
     window: window,
@@ -63,10 +63,11 @@ function toWindowItem(window, app) {
     attention: !!window.attention,
     badge: badgeFor(window.workspace),
     // A Letter Tile Window can't be pinned (CONTEXT.md "Pin" needs an App
-    // to hold a slot for); an already-pinned Window is still pinnable
-    // here; the menu ticket tells "Pin" from "Unpin" by checking the
-    // Pins list itself, not this flag.
+    // to hold a slot for).
     pinnable: !!app,
+    // True for a Window Item occupying a Pin's slot (CONTEXT.md "Pin"):
+    // its App is already pinned, so the menu shows Unpin rather than Pin.
+    pinned: !!pinned,
   };
 }
 
@@ -93,7 +94,7 @@ function toPinItem(pinId, app) {
 // `openedAt` first, and each new Window is inserted right after the last
 // Item of its own App (or, for a Window whose App can't be resolved, the
 // last Item sharing its window class) instead of at the end of the list.
-function buildWindowItems(windows, resolveApp) {
+function buildWindowItems(windows, resolveApp, pinned) {
   var ordered = windows.slice().sort(function (a, b) {
     return a.openedAt - b.openedAt;
   });
@@ -105,7 +106,7 @@ function buildWindowItems(windows, resolveApp) {
     var window = ordered[i];
     var app = resolveWindowApp(window, resolveApp);
     var groupKey = groupKeyFor(window, app);
-    var item = toWindowItem(window, app);
+    var item = toWindowItem(window, app, pinned);
 
     var insertAt =
       groupKey in groupEnd ? groupEnd[groupKey] + 1 : items.length;
@@ -168,7 +169,7 @@ function buildDockItems(windows, resolveApp, pins, resolveAppById) {
   for (var s = 0; s < pinIds.length; s++) {
     var windowsForSlot = partitioned.pinnedSlots[s];
     if (windowsForSlot.length > 0) {
-      items = items.concat(buildWindowItems(windowsForSlot, resolveApp));
+      items = items.concat(buildWindowItems(windowsForSlot, resolveApp, true));
     } else {
       items.push(toPinItem(pinIds[s], resolvePinnedApp(pinIds[s])));
     }
@@ -177,6 +178,47 @@ function buildDockItems(windows, resolveApp, pins, resolveAppById) {
   return items.concat(buildWindowItems(partitioned.unpinned, resolveApp));
 }
 
+// The context menu's state for an Item (docs/SPEC.md "Input": "Right
+// click: menu with exactly Pin/Unpin, New Window, Close Window. Pin is
+// disabled on Letter Tile Items"). `pinned` tells Pin from Unpin: always
+// true for a Pin Item (CONTEXT.md "Pin"), true for a Window Item occupying
+// one's slot. `canPin` is false only for a Letter Tile Window Item, which
+// has no App to hold a slot for — a Pin keeps Unpin enabled even once its
+// own App goes missing, since Unpin is the only way to remove it.
+// `canLaunch` mirrors "New Window launches another instance": there must
+// be a resolved App to launch. `canClose` is true only for a Window Item;
+// a bare Pin has no Window to close.
+function menuFor(item) {
+  var pinned = item.kind === "pin" || !!item.pinned;
+  return {
+    pinned: pinned,
+    canPin: item.kind === "pin" ? true : !!item.pinnable,
+    canLaunch: !!item.app,
+    canClose: item.kind === "window",
+  };
+}
+
+// The Dock's Pins list after Pin/Unpin (docs/SPEC.md "Input", the context
+// menu): appends `appId` when Pin is chosen and it isn't pinned yet, drops
+// it when Unpin is chosen, and otherwise leaves `pins` alone — a hand edit
+// that already added or removed it, or a stale menu click, is a no-op
+// rather than a duplicate slot or a second removal.
+function nextPins(pins, appId, pinned) {
+  var index = pins.indexOf(appId);
+  if (pinned) {
+    if (index === -1) return pins.slice();
+    var withoutId = pins.slice();
+    withoutId.splice(index, 1);
+    return withoutId;
+  }
+  if (index !== -1) return pins.slice();
+  return pins.concat([appId]);
+}
+
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { buildDockItems: buildDockItems };
+  module.exports = {
+    buildDockItems: buildDockItems,
+    menuFor: menuFor,
+    nextPins: nextPins,
+  };
 }

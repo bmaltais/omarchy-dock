@@ -205,6 +205,26 @@ Item {
     app.execute()
   }
 
+  // Close Window (docs/SPEC.md "Input", the context menu): the same
+  // dispatch convention as focusWindow, minus the cursor no-warp dance
+  // that dispatch needs but this one doesn't.
+  function closeWindow(address) {
+    var normalized = normalizedAddress(address)
+    if (!normalized) return
+    Quickshell.execDetached(["bash", "-lc",
+      "hyprctl dispatch \"hl.dsp.window.close({ window = \\\"address:$1\\\" })\"",
+      "bash", normalized])
+  }
+
+  // Pin/Unpin (docs/SPEC.md "Input", the context menu): DockModel.nextPins
+  // computes the Pins list's new contents; this only hands it to
+  // dockSettings.write, the same write-back path a hand edit to Pins
+  // already applies live through.
+  function togglePin(appId, pinned) {
+    if (!appId) return
+    dockSettings.write({ pins: DockModel.nextPins(dockSettings.pins, appId, pinned) })
+  }
+
   // A Pin's tooltip (docs/SPEC.md "What the Dock shows": "a 'missing'
   // tooltip"): the App's own name once resolved, its bare Pin id if the
   // App resolved but has none, or an explicit missing note once its App
@@ -212,6 +232,13 @@ Item {
   function pinTooltipText(item) {
     if (item.missing) return item.appId + " (missing)"
     return (item.app && item.app.name) || item.appId
+  }
+
+  // The Item's own App id for Pin/Unpin (docs/SPEC.md "Input"): a Pin's
+  // own id directly, or a Window Item's resolved App id — DockModel.menuFor
+  // already reports canPin false whenever a Window Item has none.
+  function menuAppId(item) {
+    return item.kind === "pin" ? item.appId : (item.app ? item.app.id : null)
   }
 
   function windowTooltipText(item) {
@@ -272,14 +299,19 @@ Item {
 
       // Hidden/Revealed and the reveal/hide timers (SPEC.md "How the Dock
       // behaves"). Kept per panel, so hovering one monitor's Reveal Strip
-      // never reveals the other monitor's Dock.
+      // never reveals the other monitor's Dock. menuOpen holds the Dock
+      // Revealed for the whole of a context-menu visit (SPEC.md "The Dock
+      // stays Revealed while its context menu is open") independent of
+      // hover, since the pointer moves onto the menu's own popup window
+      // and away from both the strip and the Dock itself.
       QtObject {
         id: revealState
 
         property bool hoveringStrip: false
         property bool hoveringDock: false
+        property bool menuOpen: false
         property bool revealed: false
-        readonly property bool hovering: hoveringStrip || hoveringDock
+        readonly property bool hovering: hoveringStrip || hoveringDock || menuOpen
 
         onHoveringChanged: {
           if (hovering) {
@@ -430,8 +462,21 @@ Item {
                 id: mouseArea
                 anchors.fill: parent
                 hoverEnabled: true
-                acceptedButtons: Qt.LeftButton
-                onClicked: {
+                acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
+                onClicked: function (mouse) {
+                  if (mouse.button === Qt.RightButton) {
+                    contextMenu.anchorItem = dockItem
+                    contextMenu.menuItem = dockItem.modelData
+                    contextMenu.visible = true
+                    return
+                  }
+                  // Middle click on any Item with a resolvable App launches
+                  // a new instance (docs/SPEC.md "Input"); launchApp is
+                  // already a no-op when there's no App to launch.
+                  if (mouse.button === Qt.MiddleButton) {
+                    root.launchApp(dockItem.modelData.app)
+                    return
+                  }
                   if (dockItem.isPin) {
                     root.launchApp(dockItem.modelData.app)
                     return
@@ -467,6 +512,147 @@ Item {
               height: Style.spacing.xs
               radius: width / 2
               color: Color.foreground
+            }
+          }
+        }
+      }
+
+      // The context menu (docs/SPEC.md "Input": "Right click: menu with
+      // exactly Pin/Unpin, New Window, Close Window. Pin is disabled on
+      // Letter Tile Items"). One instance per monitor's panel, re-anchored
+      // to whichever Item was right-clicked; DockModel.menuFor supplies
+      // every row's enabled state from the Item alone, so this only turns
+      // that into labels and the dispatch each row triggers on click.
+      PopupWindow {
+        id: contextMenu
+
+        property var anchorItem: null
+        property var menuItem: null
+        readonly property var anchorWindow: contextMenu.anchorItem ? contextMenu.anchorItem.QsWindow.window : null
+        readonly property int menuMargin: Style.spacing.xs
+        readonly property int rowWidth: Style.space(160)
+
+        readonly property var rows: {
+          var item = contextMenu.menuItem
+          if (!item) return []
+          var menu = DockModel.menuFor(item)
+          var appId = root.menuAppId(item)
+          return [
+            {
+              label: menu.pinned ? "Unpin" : "Pin",
+              enabled: menu.canPin,
+              trigger: function () { root.togglePin(appId, menu.pinned) },
+            },
+            {
+              label: "New Window",
+              enabled: menu.canLaunch,
+              trigger: function () { root.launchApp(item.app) },
+            },
+            {
+              label: "Close Window",
+              enabled: menu.canClose,
+              trigger: function () { root.closeWindow(item.window.id) },
+            },
+          ]
+        }
+
+        function close() { contextMenu.visible = false }
+
+        visible: false
+        color: "transparent"
+        implicitWidth: contextMenu.rowWidth
+        implicitHeight: menuColumn.implicitHeight
+
+        onVisibleChanged: revealState.menuOpen = contextMenu.visible
+
+        // Outside-click dismissal, same mechanism as PopupCard: while
+        // active, input is routed only to the popup and the panel behind
+        // it, so a click anywhere else clears the grab and closes the menu.
+        HyprlandFocusGrab {
+          active: contextMenu.visible
+          windows: contextMenu.anchorWindow ? [contextMenu, contextMenu.anchorWindow] : [contextMenu]
+          onCleared: contextMenu.close()
+        }
+
+        anchor {
+          id: menuAnchor
+          window: contextMenu.anchorWindow
+          adjustment: PopupAdjustment.Slide
+          edges: Edges.Top | Edges.Left
+          gravity: Edges.Bottom | Edges.Right
+          rect.width: 1
+          rect.height: 1
+
+          onAnchoring: {
+            if (!contextMenu.anchorItem || !contextMenu.anchorWindow) return
+            var target = contextMenu.anchorItem
+            var popupWidth = contextMenu.implicitWidth
+            var popupHeight = contextMenu.implicitHeight
+            var localX = target.width / 2 - popupWidth / 2
+            var localY = -popupHeight - contextMenu.menuMargin
+            var point = contextMenu.anchorWindow.contentItem.mapFromItem(target, localX, localY)
+            point.x = Math.max(contextMenu.menuMargin, Math.min(point.x, contextMenu.anchorWindow.width - popupWidth - contextMenu.menuMargin))
+            point.y = Math.max(contextMenu.menuMargin, point.y)
+            menuAnchor.rect.x = Math.round(point.x)
+            menuAnchor.rect.y = Math.round(point.y)
+          }
+        }
+
+        Rectangle {
+          anchors.fill: parent
+          radius: Style.cornerRadius
+          color: Color.popups.background
+          border.width: Style.normalBorderWidth
+          border.color: Color.popups.border
+
+          Column {
+            id: menuColumn
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: Style.spacing.xxs
+
+            Repeater {
+              model: contextMenu.rows
+
+              delegate: Rectangle {
+                id: menuRow
+                required property var modelData
+
+                width: menuColumn.width
+                height: Style.spacing.popupRowHeight
+                radius: Style.cornerRadius
+                color: menuRow.modelData.enabled && rowHover.hovered
+                  ? Style.hoverFillFor(Color.foreground, Color.accent)
+                  : "transparent"
+
+                Text {
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.leftMargin: Style.spacing.controlPaddingX
+                  anchors.rightMargin: Style.spacing.controlPaddingX
+                  text: menuRow.modelData.label
+                  color: menuRow.modelData.enabled ? Color.popups.text : Color.muted
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.body
+                }
+
+                HoverHandler {
+                  id: rowHover
+                  enabled: menuRow.modelData.enabled
+                }
+
+                MouseArea {
+                  anchors.fill: parent
+                  enabled: menuRow.modelData.enabled
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    menuRow.modelData.trigger()
+                    contextMenu.close()
+                  }
+                }
+              }
             }
           }
         }
