@@ -1,11 +1,11 @@
 // Dock service entry point (see docs/SPEC.md, milestones 1-4; vocabulary in
 // CONTEXT.md). Owns one layer-shell panel per monitor, each rendering the
-// same Items built by DockModel.buildDockItems from live Hyprland state
-// and the Dock's own Pins, Hidden by default and Revealed by hovering its
-// Reveal Strip, with the Active/Attention/running/workspace indicators
-// from milestone 3. The gesture to Pin/Unpin an App (the context menu)
-// lands in a later ticket; this only shows and launches Pins already in
-// the config.
+// same Items built by DockModel.buildDockItems from live Hyprland state,
+// the Dock's own Pins, and this session's Placed positions — Hidden by
+// default and Revealed by hovering its Reveal Strip, with the
+// Active/Attention/running/workspace indicators from milestone 3, a
+// context menu for Pin/Unpin/New Window/Close Window, and drag to reorder
+// or drag out to unpin/snap back (CONTEXT.md "Placed").
 import QtQuick
 import Quickshell
 import Quickshell.Io
@@ -21,6 +21,18 @@ Item {
 
   // Injected by omarchy-shell (the first-party/plugin service loader).
   property var shell: null
+
+  // True for the whole of a drag, on any monitor (docs/SPEC.md "Input";
+  // set/cleared around Service.qml's drag.onActiveChanged/finishDrag).
+  // dockState.refresh() checks this and skips rebuilding dockState.items
+  // while it holds: DockModel.buildDockItems always returns fresh Item
+  // objects, so any refresh mid-drag — an unrelated Hyprland event fires
+  // constantly on a real desktop — would make the Repeater tear down and
+  // rebuild every delegate, destroying the very Item whose MouseArea is
+  // driving the drag. finishDrag clears this before placeItem/unpinFromDrag
+  // so the drop's own refresh (immediate for a Window Item, via the
+  // settings write's reload for a Pin) is never the one that gets skipped.
+  property bool dragInProgress: false
 
   // Icon size and auto-hide timing (SPEC.md "How the Dock behaves" and
   // "Configuration"): read from the Dock's own entry in the shell config
@@ -59,8 +71,14 @@ Item {
     property int revealDelayMs: DockConfig.DEFAULT_REVEAL_DELAY_MS
     property int hideDelayMs: DockConfig.DEFAULT_HIDE_DELAY_MS
     property var pins: []
+    // A Placed Pin's own position (CONTEXT.md "Placed"), persisted here
+    // the same way pins is. A Placed Window Item's lives only in
+    // dockState.windowPlacements — it has no business surviving a
+    // restart — so it isn't part of this settings object at all.
+    property var placements: []
 
     onPinsChanged: dockState.refresh()
+    onPlacementsChanged: dockState.refresh()
 
     function applyShellConfig(shellConfig) {
       var entry = DockConfig.findPluginEntry(shellConfig, dockSettings.pluginId)
@@ -70,13 +88,9 @@ Item {
       dockSettings.revealDelayMs = effective.revealDelayMs
       dockSettings.hideDelayMs = effective.hideDelayMs
       dockSettings.pins = DockConfig.effectivePins(entry)
+      dockSettings.placements = DockConfig.effectivePlacements(entry)
     }
 
-    // No caller yet — the gesture to Pin/Unpin an App lands with the
-    // context menu in a later ticket — but applying a write's result still
-    // goes through shellConfigFile's own reload, the same path a hand edit
-    // takes, so there will be exactly one place that turns config into
-    // live settings once one exists.
     function write(patch) {
       if (!root.shell || typeof root.shell.updateEntryInline !== "function") return false
       var merged = DockConfig.mergeSettings(dockSettings.rawEntry, patch)
@@ -114,9 +128,29 @@ Item {
 
     property var openedAtByAddress: ({})
     property int nextOpenedAt: 0
+    // A Placed Window Item's own position (CONTEXT.md "Placed"; DockModel.js
+    // comment on `placements`): kept only here, in memory, keyed by Window
+    // address exactly like openedAtByAddress, and pruned the same way on
+    // every refresh — once a Window's address drops out, its entry drops
+    // with it, so its Placed position doesn't linger for some later,
+    // unrelated Window that happens to reuse the same address.
+    property var windowPlacements: ({})
     property var items: []
 
+    // The `placements` DockModel.buildDockItems applies (DockModel.js
+    // comment on `placements`): the permanent, persisted Placed Pins from
+    // settings, plus this session's Placed Window Items.
+    function placements() {
+      var combined = dockSettings.placements.slice()
+      for (var address in dockState.windowPlacements) {
+        combined.push({ key: "window:" + address, index: dockState.windowPlacements[address] })
+      }
+      return combined
+    }
+
     function refresh() {
+      if (root.dragInProgress) return
+
       var toplevels = Hyprland.toplevels ? Hyprland.toplevels.values : []
       var seenAddresses = {}
       var windows = []
@@ -149,7 +183,13 @@ Item {
       }
       dockState.openedAtByAddress = keptOpenedAt
 
-      dockState.items = DockModel.buildDockItems(windows, resolveApp, dockSettings.pins, resolveAppById)
+      var keptPlacements = {}
+      for (var placedAddress in dockState.windowPlacements) {
+        if (seenAddresses[placedAddress]) keptPlacements[placedAddress] = dockState.windowPlacements[placedAddress]
+      }
+      dockState.windowPlacements = keptPlacements
+
+      dockState.items = DockModel.buildDockItems(windows, resolveApp, dockSettings.pins, resolveAppById, dockState.placements())
     }
   }
 
@@ -223,6 +263,38 @@ Item {
   function togglePin(appId, pinned) {
     if (!appId) return
     dockSettings.write({ pins: DockModel.nextPins(dockSettings.pins, appId, pinned) })
+  }
+
+  // Drag within the Dock (docs/SPEC.md "Input": "reorder"; CONTEXT.md
+  // "Placed"): a Pin Item's own drop is persisted through dockSettings.write
+  // exactly like Pin/Unpin already is, so it survives a restart. A Window
+  // Item's drop only updates dockState.windowPlacements directly — it has
+  // no write-back of its own to trigger dockState.refresh() the way a
+  // settings change does, so this calls it explicitly.
+  function placeItem(item, targetIndex) {
+    if (item.kind === "pin") {
+      dockSettings.write({ placements: DockModel.placeAt(dockSettings.placements, item.key, targetIndex) })
+      return
+    }
+    dockState.windowPlacements[item.window.id] = targetIndex
+    dockState.refresh()
+  }
+
+  // Drag out of the Dock, for an Item whose App is pinned (docs/SPEC.md
+  // "Input": "Drag out of the Dock: unpin the Item's App if pinned"): one
+  // write so dropping the App from Pins and dropping its own Pin's Placed
+  // position (CONTEXT.md "Placed") land in the same shellConfig update —
+  // two separate dockSettings.write calls here would each merge onto the
+  // same pre-write rawEntry, and the first's change would be lost under
+  // the second's. Dragging an unpinned Window Item out is a snap-back
+  // (docs/SPEC.md "Input"): the Dock itself has nothing to persist for
+  // that, so it never calls this at all.
+  function unpinFromDrag(appId) {
+    if (!appId) return
+    dockSettings.write({
+      pins: DockModel.nextPins(dockSettings.pins, appId, true),
+      placements: DockModel.unplace(dockSettings.placements, "pin:" + appId),
+    })
   }
 
   // A Pin's tooltip (docs/SPEC.md "What the Dock shows": "a 'missing'
@@ -303,15 +375,21 @@ Item {
       // Revealed for the whole of a context-menu visit (SPEC.md "The Dock
       // stays Revealed while its context menu is open") independent of
       // hover, since the pointer moves onto the menu's own popup window
-      // and away from both the strip and the Dock itself.
+      // and away from both the strip and the Dock itself. dragging does
+      // the same for the whole of a drag (SPEC.md "The Dock stays
+      // Revealed ... for the whole of a drag; the hide timer starts after
+      // the drop"): once it drops back to false the hide timer starts
+      // exactly like it does when hover ends, with no separate handling
+      // needed here.
       QtObject {
         id: revealState
 
         property bool hoveringStrip: false
         property bool hoveringDock: false
         property bool menuOpen: false
+        property bool dragging: false
         property bool revealed: false
-        readonly property bool hovering: hoveringStrip || hoveringDock || menuOpen
+        readonly property bool hovering: hoveringStrip || hoveringDock || menuOpen || dragging
 
         onHoveringChanged: {
           if (hovering) {
@@ -365,6 +443,85 @@ Item {
           return natural <= available ? baseIconSize : Math.max(16, Math.floor(available / count))
         }
 
+        // Drag to reorder (docs/SPEC.md "Input"; CONTEXT.md "Placed"). The
+        // dragged Item's own delegate stays put in the Repeater (so every
+        // other Item's slot is undisturbed — reordering this Row's own
+        // model mid-drag would make the Repeater tear down and rebuild
+        // every delegate, destroying the very Item whose MouseArea is
+        // driving the drag) but renders invisible for as long as its key
+        // matches dragKey; dragGhost (declared below, a sibling of this
+        // Row) shows in its place and follows the pointer, and dropLine
+        // (also below) is the live insertion preview: a bar at whichever
+        // gap dragPreviewIndex currently names. dragKey empty and
+        // dragPreviewIndex -1 both mean "no drag in progress".
+        property string dragKey: ""
+        property int dragPreviewIndex: -1
+        // Recomputed alongside dragPreviewIndex (see updateDragPreview):
+        // hides dropLine once the drag has left the Dock, since a drag-out
+        // has nothing to do with dragPreviewIndex any more (docs/SPEC.md
+        // "Input": drag-out is unpin-or-snap-back, never a reorder).
+        property bool draggingOutside: false
+
+        function indexOfKey(items, key) {
+          for (var i = 0; i < items.length; i++) {
+            if (items[i].key === key) return i
+          }
+          return -1
+        }
+
+        // Recomputed from dragGhost's own position (docs/SPEC.md "Input")
+        // as it follows the pointer, in this Row's own parent's coordinate
+        // space — the same space dragGhost.x/y are set in, since both are
+        // children of it (see dragGhost below).
+        function updateDragPreview() {
+          if (!dockRow.dragKey) return
+          var step = dockRow.iconSize + dockRow.spacing
+          var localX = (dragGhost.x + dragGhost.width / 2) - dockRow.x
+          var index = step > 0 ? Math.round(localX / step) : 0
+          dockRow.dragPreviewIndex = Math.max(0, Math.min(index, dockState.items.length - 1))
+          dockRow.draggingOutside = dockRow.isGhostOutsideRow()
+        }
+
+        // Drag out of the Dock (docs/SPEC.md "Input"): dragGhost's centre
+        // clear of this Row's own rectangle, widened by half an icon so a
+        // drop right at the row's own edge still counts as a reorder.
+        function isGhostOutsideRow() {
+          var margin = dockRow.iconSize / 2
+          var left = dockRow.x - margin
+          var right = dockRow.x + dockRow.width + margin
+          var top = dockRow.y - margin
+          var bottom = dockRow.y + dockRow.height + margin
+          var centerX = dragGhost.x + dragGhost.width / 2
+          var centerY = dragGhost.y + dragGhost.height / 2
+          return centerX < left || centerX > right || centerY < top || centerY > bottom
+        }
+
+        // The drop (docs/SPEC.md "Input"): reorder within the Dock, unpin
+        // for an Item whose App is pinned dragged out, or (an unpinned
+        // Window Item dragged out) a snap-back with nothing to persist —
+        // dragGhost simply stops following the pointer and every Item,
+        // this one included, falls back to dockState.items' own order.
+        // Drag state (root.dragInProgress included) clears first, so the
+        // refresh placeItem/unpinFromDrag triggers isn't the one
+        // dockState.refresh's own drag guard skips.
+        function finishDrag(item) {
+          var draggedOut = dockRow.isGhostOutsideRow()
+          var targetIndex = dockRow.dragPreviewIndex
+
+          dockRow.dragKey = ""
+          dockRow.dragPreviewIndex = -1
+          dockRow.draggingOutside = false
+          dragGhost.visible = false
+          revealState.dragging = false
+          root.dragInProgress = false
+
+          if (draggedOut) {
+            if (item.kind === "pin" || item.pinned) root.unpinFromDrag(root.menuAppId(item))
+          } else if (targetIndex >= 0) {
+            root.placeItem(item, targetIndex)
+          }
+        }
+
         Repeater {
           id: repeater
           model: dockState.items
@@ -376,7 +533,12 @@ Item {
             readonly property bool active: dockItem.modelData.active
             readonly property bool attention: dockItem.modelData.attention
             readonly property bool isPin: dockItem.modelData.kind === "pin"
+            // Guards onClicked below: MouseArea still emits clicked() on
+            // release after a drag.target drag, so without this a drop
+            // would also focus/launch the Item it was just dropped near.
+            property bool wasDragged: false
 
+            opacity: dockRow.dragKey === dockItem.modelData.key ? 0 : 1
             width: dockRow.iconSize
             height: icon.height + runningDot.height + Style.spacing.xxs
 
@@ -463,7 +625,43 @@ Item {
                 anchors.fill: parent
                 hoverEnabled: true
                 acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
+                // Only a left-button press drags (docs/SPEC.md "Input"
+                // reserves right/middle for the menu and launching); drag
+                // moves dragGhost, a sibling of dockRow, not this Item
+                // itself — dockRow is a positioner and would fight any
+                // attempt to move dockItem directly.
+                drag.target: dragGhost
+
+                onPressed: function (mouse) {
+                  dockItem.wasDragged = false
+                  if (mouse.button !== Qt.LeftButton) {
+                    mouseArea.drag.target = null
+                    return
+                  }
+                  mouseArea.drag.target = dragGhost
+                  dragGhost.item = dockItem.modelData
+                  var origin = dockItem.mapToItem(dockRow.parent, 0, 0)
+                  dragGhost.x = origin.x
+                  dragGhost.y = origin.y
+                  dragGhost.width = dockItem.width
+                  dragGhost.height = dockItem.height
+                }
+
+                drag.onActiveChanged: {
+                  if (mouseArea.drag.active) {
+                    dockItem.wasDragged = true
+                    root.dragInProgress = true
+                    revealState.dragging = true
+                    dockRow.dragKey = dockItem.modelData.key
+                    dockRow.dragPreviewIndex = dockRow.indexOfKey(dockState.items, dockItem.modelData.key)
+                    dragGhost.visible = true
+                  } else if (dockRow.dragKey === dockItem.modelData.key) {
+                    dockRow.finishDrag(dockItem.modelData)
+                  }
+                }
+
                 onClicked: function (mouse) {
+                  if (dockItem.wasDragged) return
                   if (mouse.button === Qt.RightButton) {
                     contextMenu.anchorItem = dockItem
                     contextMenu.menuItem = dockItem.modelData
@@ -515,6 +713,73 @@ Item {
             }
           }
         }
+      }
+
+      // The floating icon a drag follows (docs/SPEC.md "Input": "Drag
+      // within the Dock: reorder"; issue #16's own acceptance criteria add
+      // "with a live insertion preview"). A sibling of dockRow, not one of
+      // its Repeater delegates, so dockRow's own positioning never fights its
+      // position; mouseArea.drag.target (above) moves it directly by the
+      // pointer's own delta, in this shared parent's coordinate space,
+      // starting from wherever the dragged delegate's onPressed measured
+      // it to be.
+      Item {
+        id: dragGhost
+
+        property var item: null
+
+        visible: false
+        z: 1000
+        opacity: 0.85
+
+        // Recomputes the live insertion preview directly off of the
+        // position mouseArea.drag.target (above) is actually driving —
+        // rather than off the mouse event that causes it, so this never
+        // races whatever order Qt applies the two in.
+        onXChanged: if (dockRow.dragKey) dockRow.updateDragPreview()
+        onYChanged: if (dockRow.dragKey) dockRow.updateDragPreview()
+
+        Image {
+          visible: dragGhost.item && dragGhost.item.app !== null
+          anchors.fill: parent
+          fillMode: Image.PreserveAspectFit
+          asynchronous: true
+          sourceSize.width: width * Screen.devicePixelRatio
+          sourceSize.height: height * Screen.devicePixelRatio
+          source: dragGhost.item && dragGhost.item.app ? Quickshell.iconPath(dragGhost.item.app.icon, true) : ""
+        }
+
+        Rectangle {
+          visible: dragGhost.item && dragGhost.item.app === null
+          anchors.fill: parent
+          radius: Style.cornerRadius
+          color: Color.muted
+
+          Text {
+            anchors.centerIn: parent
+            text: (dragGhost.item && dragGhost.item.letter) || ""
+            color: Color.foreground
+            font.family: Style.font.family
+            font.pixelSize: Style.font.icon
+          }
+        }
+      }
+
+      // The live insertion preview itself (issue #16's acceptance
+      // criteria, on top of docs/SPEC.md "Input"'s own "Drag within the
+      // Dock: reorder"): a bar at the gap dragPreviewIndex names, hidden
+      // once the drag has left the Dock (see draggingOutside) since
+      // drag-out is never a reorder.
+      Rectangle {
+        id: dropLine
+
+        visible: dockRow.dragKey !== "" && !dockRow.draggingOutside
+        x: dockRow.x + dockRow.dragPreviewIndex * (dockRow.iconSize + dockRow.spacing) - dockRow.spacing / 2 - width / 2
+        y: dockRow.y
+        width: 2
+        height: dockRow.height
+        radius: 1
+        color: Color.accent
       }
 
       // The context menu (docs/SPEC.md "Input": "Right click: menu with

@@ -9,6 +9,7 @@ const {
   findPluginEntry,
   effectiveSettings,
   effectivePins,
+  effectivePlacements,
   mergeSettings,
 } = require("../DockConfig.js");
 
@@ -125,4 +126,48 @@ test("effectivePins dedupes a repeated App id, keeping its first slot", () => {
   const pins = effectivePins({ pins: ["firefox", "alacritty", "firefox"] });
 
   assert.deepEqual(pins, ["firefox", "alacritty"]);
+});
+
+test("effectivePlacements is empty when the entry has no placements", () => {
+  assert.deepEqual(effectivePlacements(null), []);
+  assert.deepEqual(effectivePlacements({ id: PLUGIN_ID }), []);
+});
+
+test("effectivePlacements passes through a well-formed Placed Pin entry", () => {
+  const placements = effectivePlacements({
+    id: PLUGIN_ID,
+    placements: [{ key: "pin:firefox", index: 2 }],
+  });
+
+  assert.deepEqual(placements, [{ key: "pin:firefox", index: 2 }]);
+});
+
+test("effectivePlacements drops an entry whose key isn't a Placed Pin, since a Placed Window Item is never persisted", () => {
+  const placements = effectivePlacements({
+    placements: [{ key: "window:w1", index: 0 }, { key: "pin:firefox", index: 1 }],
+  });
+
+  assert.deepEqual(placements, [{ key: "pin:firefox", index: 1 }]);
+});
+
+test("effectivePlacements drops a hand-edited entry with no usable key or a negative/non-numeric index", () => {
+  const placements = effectivePlacements({
+    placements: [
+      { key: "pin:firefox", index: "not-a-number" },
+      { key: "pin:alacritty", index: -1 },
+      { key: 42, index: 0 },
+      null,
+      { key: "pin:btop", index: 3 },
+    ],
+  });
+
+  assert.deepEqual(placements, [{ key: "pin:btop", index: 3 }]);
+});
+
+test("effectivePlacements dedupes a repeated key, keeping its first entry", () => {
+  const placements = effectivePlacements({
+    placements: [{ key: "pin:firefox", index: 0 }, { key: "pin:firefox", index: 5 }],
+  });
+
+  assert.deepEqual(placements, [{ key: "pin:firefox", index: 0 }]);
 });

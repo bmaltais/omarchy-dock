@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const { buildDockItems, menuFor, nextPins } = require("../DockModel.js");
+const { buildDockItems, menuFor, nextPins, placeAt, unplace } = require("../DockModel.js");
 
 function makeWindow(overrides) {
   return Object.assign(
@@ -402,4 +402,158 @@ test("nextPins removes an App id when Unpin is chosen", () => {
 
 test("nextPins leaves the list unchanged when Unpin is chosen for an App that isn't pinned", () => {
   assert.deepEqual(nextPins(["alacritty"], "firefox", true), ["alacritty"]);
+});
+
+test("every Window Item and Pin Item carries a stable key for Placed positions", () => {
+  const windows = [makeWindow({ id: "w1", class: "firefox" })];
+  const withoutPin = buildDockItems(windows, resolveBrowserAndTerminal);
+  const pinOnly = buildDockItems([], () => null, ["alacritty"], (id) => ({ id }));
+
+  assert.equal(withoutPin[0].key, "window:w1");
+  assert.equal(pinOnly[0].key, "pin:alacritty");
+});
+
+test("a Placed Item is moved to its recorded index, out of its default Launch-Order/Pin-slot position", () => {
+  const windows = [
+    makeWindow({ id: "w1", class: "firefox", openedAt: 1 }),
+    makeWindow({ id: "w2", class: "alacritty", openedAt: 2 }),
+  ];
+
+  const items = buildDockItems(windows, resolveBrowserAndTerminal, [], undefined, [
+    { key: "window:w2", index: 0 },
+  ]);
+
+  assert.deepEqual(itemIds(items), ["w2", "w1"]);
+});
+
+test("a Placed Pin keeps an explicit index across separate buildDockItems calls, as a restart would make", () => {
+  const placements = [{ key: "pin:firefox", index: 1 }];
+  const windows = [makeWindow({ id: "btop-1", class: "btop", openedAt: 1 })];
+  const resolveAppById = (id) => ({ id });
+
+  const firstRun = buildDockItems(windows, () => null, ["firefox"], resolveAppById, placements);
+  const secondRun = buildDockItems(windows, () => null, ["firefox"], resolveAppById, placements);
+
+  assert.deepEqual(describeItems(firstRun), ["window:btop-1", "pin:firefox"]);
+  assert.deepEqual(describeItems(secondRun), ["window:btop-1", "pin:firefox"]);
+});
+
+test("a Placed Pin's position reasserts itself once its App's last Window closes and the bare Pin Item returns", () => {
+  const placements = [{ key: "pin:firefox", index: 0 }];
+  const resolveAppById = (id) => ({ id });
+  const windows = [
+    makeWindow({ id: "btop-1", class: "btop", openedAt: 1 }),
+    makeWindow({ id: "firefox-1", class: "firefox", openedAt: 2 }),
+  ];
+
+  const whileOpen = buildDockItems(windows, resolveBrowserAndTerminal, ["firefox"], resolveAppById, placements);
+  const afterClose = buildDockItems([windows[0]], resolveBrowserAndTerminal, ["firefox"], resolveAppById, placements);
+
+  // While firefox-1 is open there is no bare "pin:firefox" Item for the
+  // placement to match, so the placement is silently ignored and ordering
+  // falls back to the Pin-slot default (docs/SPEC.md "Ordering").
+  assert.deepEqual(describeItems(whileOpen), ["window:firefox-1", "window:btop-1"]);
+  assert.deepEqual(describeItems(afterClose), ["pin:firefox", "window:btop-1"]);
+});
+
+test("a Placed Window Item keeps its own index while its Window stays open, unaffected by other Windows opening", () => {
+  const placements = [{ key: "window:w1", index: 2 }];
+  const withOneWindow = buildDockItems(
+    [makeWindow({ id: "w1", class: "firefox", openedAt: 1 })],
+    resolveBrowserAndTerminal,
+    [],
+    undefined,
+    placements,
+  );
+  const withTwoWindows = buildDockItems(
+    [
+      makeWindow({ id: "w1", class: "firefox", openedAt: 1 }),
+      makeWindow({ id: "w2", class: "alacritty", openedAt: 2 }),
+    ],
+    resolveBrowserAndTerminal,
+    [],
+    undefined,
+    placements,
+  );
+
+  assert.deepEqual(itemIds(withOneWindow), ["w1"]);
+  assert.deepEqual(itemIds(withTwoWindows), ["w2", "w1"]);
+});
+
+test("a Placed Window Item's placement is silently dropped once its Window closes, rather than reappearing as a ghost Item", () => {
+  const placements = [{ key: "window:closed-1", index: 0 }];
+  const windows = [makeWindow({ id: "w1", class: "firefox", openedAt: 1 })];
+
+  const items = buildDockItems(windows, resolveBrowserAndTerminal, [], undefined, placements);
+
+  assert.deepEqual(itemIds(items), ["w1"]);
+});
+
+test("dragging one Window of a pinned App moves only that Window, leaving its sibling Windows in the Pin's slot", () => {
+  const resolveAppById = (id) => ({ id });
+  const windows = [
+    makeWindow({ id: "firefox-1", class: "firefox", openedAt: 1 }),
+    makeWindow({ id: "firefox-2", class: "firefox", openedAt: 2 }),
+    makeWindow({ id: "btop-1", class: "btop", openedAt: 3 }),
+  ];
+
+  const items = buildDockItems(
+    windows,
+    resolveBrowserAndTerminal,
+    ["firefox"],
+    resolveAppById,
+    [{ key: "window:firefox-2", index: 2 }],
+  );
+
+  assert.deepEqual(itemIds(items), ["firefox-1", "btop-1", "firefox-2"]);
+});
+
+test("placeAt records a new Placed index for a key with no prior placement", () => {
+  assert.deepEqual(placeAt([], "pin:firefox", 3), [{ key: "pin:firefox", index: 3 }]);
+});
+
+test("placeAt moves a key already Placed instead of adding a second entry for it", () => {
+  const placements = [{ key: "pin:firefox", index: 0 }, { key: "pin:alacritty", index: 1 }];
+
+  const next = placeAt(placements, "pin:firefox", 5);
+
+  assert.deepEqual(next, [{ key: "pin:alacritty", index: 1 }, { key: "pin:firefox", index: 5 }]);
+});
+
+test("unplace drops a key's Placed position, leaving every other key untouched", () => {
+  const placements = [{ key: "pin:firefox", index: 0 }, { key: "window:w1", index: 1 }];
+
+  assert.deepEqual(unplace(placements, "pin:firefox"), [{ key: "window:w1", index: 1 }]);
+});
+
+test("unplace is a no-op when the key was never Placed", () => {
+  const placements = [{ key: "pin:firefox", index: 0 }];
+
+  assert.deepEqual(unplace(placements, "pin:alacritty"), placements);
+});
+
+test("dragging an Item whose App is pinned out of the Dock unpins the App and drops its Pin's Placed position, leaving its Windows as ordinary Window Items", () => {
+  const resolveAppById = (id) => ({ id });
+  const windows = [makeWindow({ id: "firefox-1", class: "firefox", openedAt: 1 })];
+  const placements = [{ key: "pin:firefox", index: 0 }];
+
+  const pinsAfterDragOut = nextPins(["firefox"], "firefox", true);
+  const placementsAfterDragOut = unplace(placements, "pin:firefox");
+  const items = buildDockItems(windows, resolveBrowserAndTerminal, pinsAfterDragOut, resolveAppById, placementsAfterDragOut);
+
+  assert.deepEqual(pinsAfterDragOut, []);
+  assert.equal(items[0].pinned, false);
+  assert.deepEqual(menuFor(items[0]), { pinned: false, canPin: true, canLaunch: true, canClose: true });
+});
+
+test("dragging an unpinned Window Item out of the Dock snaps back: with no placement or Pins change made, the Dock's Items are unaffected", () => {
+  const windows = [
+    makeWindow({ id: "w1", class: "firefox", openedAt: 1 }),
+    makeWindow({ id: "w2", class: "alacritty", openedAt: 2 }),
+  ];
+
+  const before = buildDockItems(windows, resolveBrowserAndTerminal);
+  const after = buildDockItems(windows, resolveBrowserAndTerminal);
+
+  assert.deepEqual(describeItems(before), describeItems(after));
 });

@@ -39,7 +39,7 @@ Agreed on 2026-09-11 after a design interview. Vocabulary is defined in [CONTEXT
 
 ## Configuration
 
-Stored in the Dock's entry in Omarchy's shell config (`~/.config/omarchy/shell.json`, `plugins[]`), written through the shell's plugin write-back hook. Keys: icon size, reveal delay, hide delay, Pins with their Placed order. Nothing else is configurable in version one.
+Stored in the Dock's entry in Omarchy's shell config (`~/.config/omarchy/shell.json`, `plugins[]`), written through the shell's plugin write-back hook. Keys: icon size, reveal delay, hide delay, Pins, and each Placed Pin's own position (a Placed Window Item's position is never stored here — it lasts only until the Window closes). Nothing else is configurable in version one.
 
 ## Out of scope for version one
 
