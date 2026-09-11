@@ -117,3 +117,45 @@ test("Windows on a special workspace are included among the Window Items", () =>
 
   assert.deepEqual(itemIds(items), ["w1", "w2"]);
 });
+
+test("the Active Window's Item carries the Active flag, every other Item does not", () => {
+  const windows = [
+    makeWindow({ id: "w1", openedAt: 1, active: true }),
+    makeWindow({ id: "w2", openedAt: 2 }),
+  ];
+
+  const items = buildDockItems(windows, () => null);
+
+  assert.equal(items[0].active, true);
+  assert.equal(items[1].active, false);
+});
+
+test("a Window requesting Attention has its Item carry the Attention flag", () => {
+  const windows = [
+    makeWindow({ id: "w1", openedAt: 1, attention: true }),
+    makeWindow({ id: "w2", openedAt: 2 }),
+  ];
+
+  const items = buildDockItems(windows, () => null);
+
+  assert.equal(items[0].attention, true);
+  assert.equal(items[1].attention, false);
+});
+
+test("a Window Item's workspace badge is the workspace name for a regular workspace", () => {
+  const windows = [makeWindow({ id: "w1", workspace: "3", openedAt: 1 })];
+
+  const items = buildDockItems(windows, () => null);
+
+  assert.equal(items[0].badge, "3");
+});
+
+test("a Window Item's workspace badge is the special workspace's own name, without Hyprland's \"special:\" prefix", () => {
+  const windows = [
+    makeWindow({ id: "w1", workspace: "special:scratchpad", openedAt: 1 }),
+  ];
+
+  const items = buildDockItems(windows, () => null);
+
+  assert.equal(items[0].badge, "scratchpad");
+});

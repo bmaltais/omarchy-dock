@@ -1,13 +1,15 @@
-// Dock service entry point (see docs/SPEC.md, milestones 1-2; vocabulary in
+// Dock service entry point (see docs/SPEC.md, milestones 1-3; vocabulary in
 // CONTEXT.md). Owns one layer-shell panel per monitor, each rendering the
 // same Window Items built by DockModel.buildDockItems from live Hyprland
-// state, Hidden by default and Revealed by hovering its Reveal Strip.
-// Indicators and Pins land in later milestones.
+// state, Hidden by default and Revealed by hovering its Reveal Strip, with
+// the Active/Attention/running/workspace indicators from milestone 3. Pins
+// land in a later milestone.
 import QtQuick
 import Quickshell
 import Quickshell.Wayland
 import Quickshell.Hyprland
 import qs.Commons
+import qs.Ui
 import "DockModel.js" as DockModel
 
 Item {
@@ -64,6 +66,9 @@ Item {
           class: info.class || "",
           workspace: toplevel.workspace ? toplevel.workspace.name : String((info.workspace && info.workspace.name) || ""),
           openedAt: dockState.openedAtByAddress[address],
+          title: toplevel.title || info.title || "",
+          active: !!toplevel.activated,
+          attention: !!toplevel.urgent,
         })
       }
 
@@ -234,43 +239,125 @@ Item {
             id: dockItem
             required property var modelData
 
-            width: dockRow.iconSize
-            height: dockRow.iconSize
+            readonly property bool active: dockItem.modelData.active
+            readonly property bool attention: dockItem.modelData.attention
 
-            Image {
-              visible: dockItem.modelData.app !== null
+            width: dockRow.iconSize
+            height: icon.height + runningDot.height + Style.spacing.xxs
+
+            // The Active Window's highlight and the Attention tint (SPEC.md
+            // "Indicators"): CONTEXT.md says the Window Item itself is
+            // highlighted/tinted, so these cover the whole Item — icon and
+            // running dot both — not just the icon square. Drawn behind the
+            // icon so both can show at once without fighting the icon/Letter
+            // Tile for the same Rectangle.
+            Rectangle {
+              visible: dockItem.active
               anchors.fill: parent
-              fillMode: Image.PreserveAspectFit
-              asynchronous: true
-              sourceSize.width: width * Screen.devicePixelRatio
-              sourceSize.height: height * Screen.devicePixelRatio
-              source: dockItem.modelData.app ? Quickshell.iconPath(dockItem.modelData.app.icon, true) : ""
+              radius: Style.cornerRadius
+              color: Style.selectedFill
+              border.width: Style.selectedBorderWidth
+              border.color: Style.selectedBorderColor
             }
 
             Rectangle {
-              visible: dockItem.modelData.app === null
+              visible: dockItem.attention
               anchors.fill: parent
               radius: Style.cornerRadius
-              color: Color.muted
+              color: Util.alpha(Color.urgent, 0.35)
+            }
 
-              Text {
-                anchors.centerIn: parent
-                text: dockItem.modelData.letter || ""
-                color: Color.foreground
-                font.family: Style.font.family
-                font.pixelSize: Style.font.icon
+            Item {
+              id: icon
+              anchors.top: parent.top
+              anchors.horizontalCenter: parent.horizontalCenter
+              width: dockRow.iconSize
+              height: dockRow.iconSize
+
+              Image {
+                visible: dockItem.modelData.app !== null
+                anchors.fill: parent
+                fillMode: Image.PreserveAspectFit
+                asynchronous: true
+                sourceSize.width: width * Screen.devicePixelRatio
+                sourceSize.height: height * Screen.devicePixelRatio
+                source: dockItem.modelData.app ? Quickshell.iconPath(dockItem.modelData.app.icon, true) : ""
+              }
+
+              Rectangle {
+                visible: dockItem.modelData.app === null
+                anchors.fill: parent
+                radius: Style.cornerRadius
+                color: Color.muted
+
+                Text {
+                  anchors.centerIn: parent
+                  text: dockItem.modelData.letter || ""
+                  color: Color.foreground
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.icon
+                }
+              }
+
+              // Workspace badge (docs/SPEC.md "Indicators"): the model
+              // has already turned a special workspace's "special:" IPC
+              // name into its own name.
+              Rectangle {
+                visible: (dockItem.modelData.badge || "").length > 0
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                radius: height / 2
+                color: Color.background
+                border.width: Style.normalBorderWidth
+                border.color: Color.muted
+                width: Math.max(height, badgeText.implicitWidth + Style.spacing.xs * 2)
+                height: Style.font.caption + Style.spacing.xxs * 2
+
+                Text {
+                  id: badgeText
+                  anchors.centerIn: parent
+                  text: dockItem.modelData.badge || ""
+                  color: Color.foreground
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              MouseArea {
+                id: mouseArea
+                anchors.fill: parent
+                hoverEnabled: true
+                acceptedButtons: Qt.LeftButton
+                onClicked: {
+                  if (dockItem.active) return
+                  root.focusWindow(dockItem.modelData.window.id)
+                }
+              }
+
+              // Bound to revealState.revealed, not just hover, so the
+              // tooltip disappears the moment the Dock hides instead of
+              // lingering until the pointer physically leaves the Item; it
+              // has no hover handling of its own, so it never feeds
+              // revealState and can't keep the Dock revealed on its own.
+              PanelToolTip {
+                visible: mouseArea.containsMouse && revealState.revealed
+                text: (dockItem.modelData.window.title || dockItem.modelData.window.class || "")
+                  + "\nWorkspace: " + (dockItem.modelData.badge || "")
               }
             }
 
-            MouseArea {
-              anchors.fill: parent
-              acceptedButtons: Qt.LeftButton
-              onClicked: {
-                var address = dockItem.modelData.window.id
-                var active = Hyprland.activeToplevel !== null && Hyprland.activeToplevel.address === address
-                if (active) return
-                root.focusWindow(address)
-              }
+            // The running dot (SPEC.md "Indicators"): every Window Item
+            // shows one, so a future Pin with no Windows is the only Item
+            // without it.
+            Rectangle {
+              id: runningDot
+              anchors.top: icon.bottom
+              anchors.topMargin: Style.spacing.xxs
+              anchors.horizontalCenter: parent.horizontalCenter
+              width: Style.spacing.xs
+              height: Style.spacing.xs
+              radius: width / 2
+              color: Color.foreground
             }
           }
         }
