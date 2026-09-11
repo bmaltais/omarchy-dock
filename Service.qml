@@ -6,11 +6,13 @@
 // land in a later milestone.
 import QtQuick
 import Quickshell
+import Quickshell.Io
 import Quickshell.Wayland
 import Quickshell.Hyprland
 import qs.Commons
 import qs.Ui
 import "DockModel.js" as DockModel
+import "DockConfig.js" as DockConfig
 
 Item {
   id: root
@@ -18,19 +20,79 @@ Item {
   // Injected by omarchy-shell (the first-party/plugin service loader).
   property var shell: null
 
-  // Auto-hide timing (SPEC.md "How the Dock behaves"). These become
-  // user settings in milestone 4; today they're the fixed defaults.
+  // Icon size and auto-hide timing (SPEC.md "How the Dock behaves" and
+  // "Configuration"): read from the Dock's own entry in the shell config
+  // (dockSettings below) and defaulted by DockConfig when the entry has no
+  // values, a value is missing, or a hand edit leaves one unusable.
   // hideDelayMs must comfortably exceed slideDurationMs: the pointer
   // crosses the sliver between the Reveal Strip and the risen Dock while
   // neither is hovered, and the hide timer must not win that race.
-  readonly property int revealDelayMs: 200
-  readonly property int hideDelayMs: 300
+  readonly property int iconSize: dockSettings.iconSize
+  readonly property int revealDelayMs: dockSettings.revealDelayMs
+  readonly property int hideDelayMs: dockSettings.hideDelayMs
   readonly property int slideDurationMs: 150
   // Kept just thick enough to be reliably hoverable; the screen edge itself
   // stops the cursor, so the strip doesn't need real height to feel solid,
   // and staying thin keeps it from swallowing clicks meant for a maximized
   // window's bottom edge.
   readonly property int revealStripHeight: 4
+
+  // Settings (docs/SPEC.md "Configuration"): read from the Dock's own entry
+  // in the shell config's plugins[] array and written back through
+  // shell.updateEntryInline, the write-back hook the shell gives every
+  // plugin for its own entry (PluginShellApi.updateEntryInline). rawEntry
+  // keeps the entry exactly as last read so write() can fold a settings
+  // change onto it (DockConfig.mergeSettings) instead of replacing it
+  // outright — updateEntryInline persists whatever object it's given as the
+  // whole entry, so losing rawEntry's other keys here would lose them from
+  // shell.json too, including Pins once a later milestone adds them.
+  QtObject {
+    id: dockSettings
+
+    readonly property string pluginId: root.shell && root.shell.pluginId ? root.shell.pluginId : "bernard.dock"
+    property var rawEntry: null
+    property int iconSize: DockConfig.DEFAULT_ICON_SIZE
+    property int revealDelayMs: DockConfig.DEFAULT_REVEAL_DELAY_MS
+    property int hideDelayMs: DockConfig.DEFAULT_HIDE_DELAY_MS
+
+    function applyShellConfig(shellConfig) {
+      var entry = DockConfig.findPluginEntry(shellConfig, dockSettings.pluginId)
+      var effective = DockConfig.effectiveSettings(entry)
+      dockSettings.rawEntry = entry
+      dockSettings.iconSize = effective.iconSize
+      dockSettings.revealDelayMs = effective.revealDelayMs
+      dockSettings.hideDelayMs = effective.hideDelayMs
+    }
+
+    // No caller yet — a settings UI lands with Pins in a later milestone —
+    // but applying a write's result still goes through shellConfigFile's
+    // own reload, the same path a hand edit takes, so there will be exactly
+    // one place that turns config into live settings once one exists.
+    function write(patch) {
+      if (!root.shell || typeof root.shell.updateEntryInline !== "function") return false
+      var merged = DockConfig.mergeSettings(dockSettings.rawEntry, patch)
+      return root.shell.updateEntryInline(dockSettings.pluginId, merged)
+    }
+  }
+
+  FileView {
+    id: shellConfigFile
+    path: Quickshell.env("HOME") + "/.config/omarchy/shell.json"
+    watchChanges: true
+    printErrors: false
+
+    function parseText() {
+      try {
+        return JSON.parse(text() || "{}")
+      } catch (e) {
+        return null
+      }
+    }
+
+    onLoaded: dockSettings.applyShellConfig(shellConfigFile.parseText())
+    onLoadFailed: dockSettings.applyShellConfig(null)
+    onFileChanged: reload()
+  }
 
   // Tracks Launch Order across live IPC updates: each Window's opened-at
   // rank is assigned the first time its address is seen and kept for as
@@ -221,7 +283,7 @@ Item {
           onHoveredChanged: revealState.hoveringDock = hovered
         }
 
-        readonly property int baseIconSize: 48
+        readonly property int baseIconSize: root.iconSize
         readonly property real maxWidth: Math.max(0, panel.width - Style.gapsOut * 2)
         readonly property int iconSize: {
           var count = repeater.count

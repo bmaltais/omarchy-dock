@@ -1,0 +1,71 @@
+// Dock settings (see docs/SPEC.md "Configuration"; vocabulary in CONTEXT.md).
+// No Quickshell or QML imports, so the exact same file loads as a JS import
+// inside the shell and via `require` under Node for the test suite, same as
+// DockModel.js.
+//
+// Settings live in the Dock's own entry in the shell config's `plugins[]`
+// array: `{ id: "bernard.dock", iconSize, revealDelayMs, hideDelayMs }`.
+// findPluginEntry locates that entry (or null if the Dock has never been
+// enabled or the config can't be read); effectiveSettings turns it into the
+// three settings the Dock actually uses, defaulting anything missing or not
+// a usable positive number. mergeSettings folds a settings change onto the
+// raw entry rather than replacing it outright, so keys this ticket doesn't
+// know about (Pins, added in a later milestone) survive a write-back.
+
+var DEFAULT_ICON_SIZE = 48;
+var DEFAULT_REVEAL_DELAY_MS = 200;
+var DEFAULT_HIDE_DELAY_MS = 300;
+
+function isPlainObject(value) {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function positiveNumberOr(value, fallback) {
+  var number = Number(value);
+  return isFinite(number) && number > 0 ? number : fallback;
+}
+
+function findPluginEntry(shellConfig, pluginId) {
+  var plugins =
+    isPlainObject(shellConfig) && Array.isArray(shellConfig.plugins)
+      ? shellConfig.plugins
+      : [];
+  for (var i = 0; i < plugins.length; i++) {
+    if (isPlainObject(plugins[i]) && plugins[i].id === pluginId) {
+      return plugins[i];
+    }
+  }
+  return null;
+}
+
+function effectiveSettings(entry) {
+  var source = isPlainObject(entry) ? entry : {};
+  return {
+    iconSize: positiveNumberOr(source.iconSize, DEFAULT_ICON_SIZE),
+    revealDelayMs: positiveNumberOr(
+      source.revealDelayMs,
+      DEFAULT_REVEAL_DELAY_MS,
+    ),
+    hideDelayMs: positiveNumberOr(source.hideDelayMs, DEFAULT_HIDE_DELAY_MS),
+  };
+}
+
+function mergeSettings(entry, patch) {
+  var next = {};
+  var source = isPlainObject(entry) ? entry : {};
+  var updates = isPlainObject(patch) ? patch : {};
+  for (var key in source) next[key] = source[key];
+  for (var patchKey in updates) next[patchKey] = updates[patchKey];
+  return next;
+}
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    DEFAULT_ICON_SIZE: DEFAULT_ICON_SIZE,
+    DEFAULT_REVEAL_DELAY_MS: DEFAULT_REVEAL_DELAY_MS,
+    DEFAULT_HIDE_DELAY_MS: DEFAULT_HIDE_DELAY_MS,
+    findPluginEntry: findPluginEntry,
+    effectiveSettings: effectiveSettings,
+    mergeSettings: mergeSettings,
+  };
+}
