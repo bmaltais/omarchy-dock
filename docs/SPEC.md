@@ -6,7 +6,7 @@ Agreed on 2026-09-11 after a design interview. Vocabulary is defined in [CONTEXT
 
 - Omarchy shell plugin, id `bernard.dock`, display name "Dock", licence MIT.
 - Kind `service` with `keepLoaded: true`; the plugin owns its own layer-shell surfaces.
-- This repository's root is the plugin directory (`manifest.json` at the root), so `omarchy plugin add <git-url>` installs it. For development, symlink the checkout into `~/.config/omarchy/plugins/bernard.dock/` so the shell hot-reloads on save.
+- This repository's root is the plugin directory (`manifest.json` at the root), so `omarchy plugin add <git-url>` installs it. For development, symlink the checkout into `~/.config/omarchy/plugins/bernard.dock/`. The shell's own file watcher doesn't follow that symlink, so a save there isn't picked up automatically; run `omarchy-shell shell rescanPlugins` after editing, or `omarchy restart shell` to pick up changes to the `keepLoaded` service itself. See the README's development-install section.
 - Personal project, published so others can use it.
 
 ## What the Dock shows
