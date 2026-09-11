@@ -210,7 +210,27 @@ Item {
     function onValuesChanged() { dockState.refresh() }
   }
 
-  Component.onCompleted: dockState.refresh()
+  // A Window's `class` (used for both App resolution and the Letter Tile
+  // fallback) comes from toplevel.lastIpcObject, which Quickshell only
+  // populates from a Window's own "openwindow" IPC event — a Window
+  // already open when this service starts (every Window, right after
+  // enabling the Dock or restarting the shell) never gets that event
+  // during this run, so its lastIpcObject stays `{}` forever and it
+  // renders as a blank, letter-less square (confirmed on a machine with
+  // no Windows opened since the last shell restart). Hyprland.refreshToplevels()
+  // force-fetches the missing data via `hyprctl -j clients`; it's async
+  // with no completion signal to hook, so the one-shot timer below just
+  // gives it a moment to land before the follow-up refresh() picks it up.
+  Component.onCompleted: {
+    Hyprland.refreshToplevels()
+    dockState.refresh()
+  }
+
+  Timer {
+    interval: 300
+    running: true
+    onTriggered: dockState.refresh()
+  }
 
   function resolveApp(window) {
     return window.class ? DesktopEntries.heuristicLookup(window.class) || null : null
