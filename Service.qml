@@ -231,14 +231,25 @@ Item {
   // second, so a fixed-delay timer fires before the data lands on a slow
   // boot, and nothing else was ever guaranteed to retry — every
   // already-open Window's tile stayed blank until some unrelated Hyprland
-  // event happened to trigger a refresh. Hyprland.toplevels stays empty
-  // for those Windows until that fetch actually lands (confirmed: it's not
-  // pre-populated with placeholders), so an Instantiator's onObjectAdded is
-  // the real completion signal instead of a guess — it fires exactly when
-  // each toplevel appears, already carrying its class.
+  // event happened to trigger a refresh. Confirmed via live logging on
+  // this machine that Hyprland.toplevels gains its entries for these
+  // Windows *before* their class does: each toplevel is added with an
+  // empty lastIpcObject, which is then hydrated moments later in place.
+  // So both edges matter — onObjectAdded covers a toplevel that (on some
+  // runs) arrives already populated, and the per-toplevel
+  // lastIpcObjectChanged watcher below covers the far more common case
+  // here, where it arrives empty and is corrected right after.
   Instantiator {
     model: Hyprland.toplevels
-    delegate: Item {}
+    delegate: Item {
+      id: hydrationWatcher
+      required property var modelData
+
+      Connections {
+        target: hydrationWatcher.modelData
+        function onLastIpcObjectChanged() { dockState.refresh() }
+      }
+    }
     onObjectAdded: function (index, object) { dockState.refresh() }
   }
 
