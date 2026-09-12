@@ -253,6 +253,41 @@ Item {
     onObjectAdded: function (index, object) { dockState.refresh() }
   }
 
+  // The two hydration paths above only fire if `hyprctl -j clients` (the
+  // fetch refreshToplevels() triggers) actually lands. Confirmed live: at
+  // a real login, with several apps launching at once and Hyprland's own
+  // control socket busy with all of them, that fetch can stall well past
+  // the 500ms-or-so it takes on an already-settled desktop (every
+  // `omarchy restart shell` test) — one already-open Window sat
+  // unresolved for over 20 seconds and dozens of unrelated refreshes here
+  // without ever hydrating. So the single call in Component.onCompleted
+  // isn't enough on its own: retry it every second for a while.
+  //
+  // A first version of this timer stopped as soon as dockState.items had
+  // no unresolved Window Item — which on this same machine disarmed it
+  // during attempt 1, *before* the stalled toplevel had even been added
+  // to Hyprland.toplevels, since an empty item list has nothing to find
+  // unresolved. So this doesn't try to detect convergence at all: it just
+  // keeps refreshing on a fixed schedule for a generous window, cheap
+  // enough that a few extra `hyprctl` calls after things have already
+  // resolved cost nothing.
+  Timer {
+    id: hydrationRetry
+    interval: 1000
+    repeat: true
+    running: true
+    property int attempts: 0
+
+    onTriggered: {
+      hydrationRetry.attempts++
+      if (hydrationRetry.attempts >= 30) {
+        hydrationRetry.running = false
+        return
+      }
+      Hyprland.refreshToplevels()
+    }
+  }
+
   function resolveApp(window) {
     return window.class ? DesktopEntries.heuristicLookup(window.class) || null : null
   }
