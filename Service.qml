@@ -7,6 +7,7 @@
 // context menu for Pin/Unpin/New Window/Close Window, and drag to reorder
 // or drag out to unpin/snap back (CONTEXT.md "Placed").
 import QtQuick
+import QtQml.Models
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
@@ -218,18 +219,27 @@ Item {
   // during this run, so its lastIpcObject stays `{}` forever and it
   // renders as a blank, letter-less square (confirmed on a machine with
   // no Windows opened since the last shell restart). Hyprland.refreshToplevels()
-  // force-fetches the missing data via `hyprctl -j clients`; it's async
-  // with no completion signal to hook, so the one-shot timer below just
-  // gives it a moment to land before the follow-up refresh() picks it up.
+  // force-fetches the missing data via `hyprctl -j clients`.
   Component.onCompleted: {
     Hyprland.refreshToplevels()
     dockState.refresh()
   }
 
-  Timer {
-    interval: 300
-    running: true
-    onTriggered: dockState.refresh()
+  // refreshToplevels() is async with no completion signal of its own, and a
+  // blind "wait a bit then refresh once" timer isn't reliable: confirmed on
+  // this machine, a cold `hyprctl -j clients` fetch can take over a
+  // second, so a fixed-delay timer fires before the data lands on a slow
+  // boot, and nothing else was ever guaranteed to retry — every
+  // already-open Window's tile stayed blank until some unrelated Hyprland
+  // event happened to trigger a refresh. Hyprland.toplevels stays empty
+  // for those Windows until that fetch actually lands (confirmed: it's not
+  // pre-populated with placeholders), so an Instantiator's onObjectAdded is
+  // the real completion signal instead of a guess — it fires exactly when
+  // each toplevel appears, already carrying its class.
+  Instantiator {
+    model: Hyprland.toplevels
+    delegate: Item {}
+    onObjectAdded: function (index, object) { dockState.refresh() }
   }
 
   function resolveApp(window) {
