@@ -254,37 +254,37 @@ Item {
   }
 
   // The two hydration paths above only fire if `hyprctl -j clients` (the
-  // fetch refreshToplevels() triggers) actually lands. Confirmed live: at
-  // a real login, with several apps launching at once and Hyprland's own
-  // control socket busy with all of them, that fetch can stall well past
-  // the 500ms-or-so it takes on an already-settled desktop (every
-  // `omarchy restart shell` test) — one already-open Window sat
-  // unresolved for over 20 seconds and dozens of unrelated refreshes here
-  // without ever hydrating. So the single call in Component.onCompleted
-  // isn't enough on its own: retry it every second for a while.
+  // fetch refreshToplevels() triggers) actually lands, and that isn't
+  // guaranteed — confirmed live, more than once, on this machine: a
+  // Window can sit with an empty class through dozens of unrelated
+  // refresh() calls and 20+ seconds (once even 56+ seconds) without
+  // either path ever firing for it. This isn't only a login-time thing
+  // either — it's been seen for a Window opened minutes into an
+  // already-running session, well past any fixed post-startup window.
+  // So this polls dockState.items every second, for as long as the
+  // service runs, and re-issues refreshToplevels() whenever a Window
+  // Item is still sitting unresolved (no App, no Letter Tile letter).
   //
-  // A first version of this timer stopped as soon as dockState.items had
-  // no unresolved Window Item — which on this same machine disarmed it
-  // during attempt 1, *before* the stalled toplevel had even been added
-  // to Hyprland.toplevels, since an empty item list has nothing to find
-  // unresolved. So this doesn't try to detect convergence at all: it just
-  // keeps refreshing on a fixed schedule for a generous window, cheap
-  // enough that a few extra `hyprctl` calls after things have already
-  // resolved cost nothing.
+  // An earlier version tried to be clever and stop once nothing looked
+  // unresolved, counting a fixed number of attempts after startup only —
+  // confirmed live that this disarms itself on attempt 1, before the
+  // stalled toplevel has even been added to Hyprland.toplevels (an empty
+  // item list has nothing to find unresolved), and confirmed live again
+  // that a stall can happen well after any such fixed window would have
+  // expired. So this never stops, and only calls refreshToplevels() when
+  // there's actually something to fix — a same-tick miss just costs one
+  // more second before the next tick catches it, rather than losing the
+  // safety net for good.
   Timer {
-    id: hydrationRetry
     interval: 1000
     repeat: true
     running: true
-    property int attempts: 0
 
     onTriggered: {
-      hydrationRetry.attempts++
-      if (hydrationRetry.attempts >= 30) {
-        hydrationRetry.running = false
-        return
-      }
-      Hyprland.refreshToplevels()
+      var unresolved = dockState.items.some(function (it) {
+        return it.kind === "window" && !it.app && !it.letter
+      })
+      if (unresolved) Hyprland.refreshToplevels()
     }
   }
 
